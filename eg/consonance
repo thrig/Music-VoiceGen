@@ -1,0 +1,227 @@
+#!/usr/bin/env perl
+#
+#     perl consonance
+#   should result in an out.midi
+# below here look for things to TWEAK
+
+use 5.10.0;
+use strict;
+use warnings;
+
+use MIDI;
+sub CHANNEL () { 0 }
+sub NO_VELO () { 0 }
+
+use Music::VoiceGen;
+use Music::Tension::Cope;
+my $tension = Music::Tension::Cope->new;
+
+# TWEAK, TWEAK, TWEAK, TWEAK
+# how long to go on for
+my $BEATS = 128;
+
+# how long to look for more consonant phrases (lower if CPU slow)
+my $TRIALS = 1e4;
+
+# allowed intervals
+my @intervals = qw/0 1 2 3 3 4 5 7 8 12 -1 -2 -3 -4 -5 -7 -8 -12/;
+
+# how many voices and what pitches they are allowed to hit NOTE this is
+# soprano[0] and bass[-1], if you need voice specific rules
+my @voices = (
+    Music::VoiceGen->new(
+        pitches   => [qw/65 67 69 71 72 74 76 77 79 81/],
+        intervals => \@intervals,
+        weightfn  => \&weighty,
+    ),
+    Music::VoiceGen->new(
+        pitches   => [qw/57 59 60 62 64 65 67 69/],
+        intervals => \@intervals,
+        weightfn  => \&weighty,
+    ),
+    Music::VoiceGen->new(
+        pitches   => [qw/48 50 52 53 55 57 59 60 62/],
+        intervals => \@intervals,
+        weightfn  => \&weighty,
+    ),
+    Music::VoiceGen->new(
+        pitches   => [qw/41 43 45 47 48 50 52 53 55 57/],
+        intervals => \@intervals,
+        weightfn  => \&weighty,
+    ),
+);
+
+my ( @best_phrase, $best_score );
+$best_score = ~0;
+
+for my $trialn ( 1 .. $TRIALS ) {
+    my @phrase;
+    for my $voicen ( 0 .. $#voices ) {
+        my @melody;
+        for my $note ( 0 .. $BEATS - 1 ) {
+            push @melody, $voices[$voicen]->rand;
+        }
+        # TWEAK mutation - except any chromatics are usually not handled
+        # properly and thus distracting
+        #mutate( \@melody ) unless $voicen == $#voices;
+        push @phrase, \@melody;
+    }
+    # scoring function really needs a "vertically oriented pitch set"
+    # which some of you may recognize as a "chord"
+    my @vops;
+    for my $note ( 0 .. $#{ $phrase[0] } ) {
+        push @vops, [ sort { $a <=> $b } map { $phrase[$_][$note] } 0 .. $#phrase ];
+    }
+    my $score = score_vops( \@vops );
+    if ( $score < $best_score ) {
+        @best_phrase = @phrase;
+        $best_score  = $score;
+    }
+}
+
+melodize( \@best_phrase );
+midi_out( \@best_phrase );
+exit;
+
+sub get_patch {
+    # TWEAK what midi patch to use for what voice
+    my @patches = qw/42 42 42 42/;
+    state $patchno = 0;
+    return $patches[ $patchno++ ] // 0;
+}
+
+sub melodize {
+    my ($phrase) = @_;
+    for my $voice (@$phrase) {
+        my ( %notefreq, %pitch2index );
+        my $freqsum = 0;
+        for my $n (@$voice) {
+            $notefreq{$n}++;
+            $freqsum++;
+        }
+        for my $v ( values %notefreq ) {
+            $v /= $freqsum;
+        }
+        my @pitches = sort { $a <=> $b } keys %notefreq;
+        for my $i ( 0 .. $#pitches ) {
+            $pitch2index{ $pitches[$i] } = $i;
+        }
+        for my $noten ( 0 .. $#$voice - 1 ) {
+            my @between = pitches_between( \%pitch2index, \@pitches, $voice->[$noten],
+                $voice->[ $noten + 1 ] );
+            # ... and all that fuss just to sometimes play passing notes
+            if ( @between == 1 and rand() / 2 < $notefreq{ $between[0] } ) {
+                $voice->[$noten] = [ $voice->[$noten], $between[0] ];
+            }
+            if ( @between == 2 and rand() < $notefreq{ $between[0] } ) {
+                $voice->[$noten] = [ $voice->[$noten], [ @between[ 0, 1 ] ] ];
+            }
+            if ( @between == 3 and rand() < $notefreq{ $between[0] } ) {
+                $voice->[$noten] = [ [ $voice->[$noten], $between[0] ], [ @between[ 1, 2 ] ] ];
+            }
+        }
+    }
+}
+
+sub midi_out {
+    my ($phrase) = @_;
+    my @tracks;
+    for my $voice (@$phrase) {
+        my $track = MIDI::Track->new;
+        # TWEAK track-level MIDI details
+        $track->new_event( 'set_tempo', 0, 500000 );
+        $track->new_event( 'patch_change', 0, 0, get_patch() );
+        for my $note (@$voice) {
+            # duration should be evenly divisible by 2 over a few divisions
+            # (depending on what melodize does). stattaco or sustain can
+            # be adjusted through the percent
+            note_out( $track, $note, 888, 0.31 );
+        }
+        push @tracks, $track;
+    }
+    my $opus = MIDI::Opus->new( { ticks => 384, tracks => \@tracks } );
+    $opus->write_to_file('out.midi');
+}
+
+sub mutate {
+    my ($melody) = @_;
+    # TWEAK mutation odds. Or disable it!
+    for my $note (@$melody) {
+        if ( rand() < 0.02 ) {
+            $note += rand() > 0.5 ? 1 : -1;
+        }
+    }
+}
+
+sub nonzerorand {
+    my $x = 0;
+    $x = rand() while $x == 0;
+    return $x;
+}
+
+sub note_out {
+    my ( $track, $note, $duration, $percent ) = @_;
+    if ( ref $note eq 'ARRAY' ) {
+        for my $subnote (@$note) {
+            note_out( $track, $subnote, int( $duration / 2 ), $percent );
+        }
+    } else {
+        my $reals_duration = int( $duration * $percent );
+        my $remainder      = $duration - $reals_duration;
+        # TWEAK MIDI note details. The velocity, or volume, in particular
+        $track->new_event( 'note_on', 0, CHANNEL, $note, 89 + int rand 17 );
+        $track->new_event( 'note_off', $reals_duration, CHANNEL, $note, NO_VELO );
+        if ( $remainder > 0 ) {
+            $track->new_event( 'note_on',  0,          CHANNEL, $note, NO_VELO );
+            $track->new_event( 'note_off', $remainder, CHANNEL, $note, NO_VELO );
+        }
+    }
+}
+
+sub pitches_between {
+    my ( $p2i, $pitchl, @pair ) = @_;
+    my @index = sort { $a <=> $b } map { $p2i->{$_} } @pair[ 0, 1 ];
+    my @between;
+    if ( $index[1] - $index[0] > 1 ) {
+        @between = @{$pitchl}[ $index[0] + 1 .. $index[1] - 1 ];
+    }
+    return @between;
+}
+
+sub score_vops {
+    my ($vops) = @_;
+    # TWEAK could change scoring, etc
+    my %scores = (
+        rootmotion => { weight => 2, score => 0 },
+        vertical   => { weight => 1, score => 0 },
+    );
+    for my $chordn ( 0 .. $#$vops ) {
+        $scores{vertical}->{score} += $tension->vertical( $vops->[$chordn] );
+        if ( $chordn > 0 ) {
+            $scores{rootmotion}->{score} +=
+              $tension->approach( $vops->[$chordn][0] - $vops->[ $chordn - 1 ][0] );
+        }
+    }
+    my $score = 0;
+    for my $sr ( values %scores ) {
+        $score += $sr->{weight} * $sr->{score};
+    }
+    return $score;
+}
+
+sub weighty {
+    my ( $from, $to, $interval ) = @_;
+    # TWEAK desc intervals more common
+    my $fudge = $interval < 0 ? 3.3 : 1;
+    # favor smaller intervals
+    my $odds =
+      1 / abs( $interval || 1 ) * $fudge * ( nonzerorand() / 7 );
+    # disfavor oblique motion (repeated notes)
+    $odds /= 13 if $interval == 0;
+    return $odds;
+}
+
+# NOTE this probably should be two scripts, one that does the voice-
+# building, and another that scores different melodizations of the
+# output of the first; also, the melodize phase could identify phrases
+# and perhaps make logical velocity adjustments for those, and etc.
