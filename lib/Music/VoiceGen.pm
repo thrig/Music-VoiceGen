@@ -405,6 +405,11 @@ causes the calling code to not make additional calls to B<rand>.
       last if $pitch == -1;
   }
 
+Also, if there are possibilities at depth, these will always be used.
+There may be a need to randomize this (sometimes choosing from a less
+specific set), or to combine the options for "65", "60.65", and so
+forth somehow.
+
 =head1 SEE ALSO
 
 L<MIDI::Simple> or L<Music::Scala> or L<Music::PitchNum> have means to
