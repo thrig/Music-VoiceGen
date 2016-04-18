@@ -1,9 +1,10 @@
 Changes
-lib/Music/VoiceGen.pm
+LICENSE
+MANIFEST
 Makefile.PL
-MANIFEST			This list of files
 README
+lib/Music/VoiceGen.pm
 t/00-load.t
-t/manifest.t
+t/Music-VoiceGen.t
 t/pod-coverage.t
 t/pod.t
