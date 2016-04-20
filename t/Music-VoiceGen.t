@@ -143,4 +143,27 @@ dies_ok( sub { Music::VoiceGen->new }, 'no params set' );
     $deeply->( \@pitches, [qw/65 67 65 -1/], "a cycle" );
 }
 
-plan tests => 29;
+# subsets!
+{
+    my $svg = Music::VoiceGen->new( possibles => { 1 => { 1 => 1 } } );
+    my ( @subsets, %possibles );
+    $svg->subsets(
+        2, 4,
+        sub {
+            push @subsets, \@_;
+#           $possibles{ join ".", @_[0..$#_-1] }{$_[-1]}++;
+        },
+        [qw/65 67 69 60 62/],
+    );
+    $deeply->(
+        \@subsets,
+        [   [qw/65 67/],    [qw/65 67 69/],    [qw/65 67 69 60/], [qw/67 69/],
+            [qw/67 69 60/], [qw/67 69 60 62/], [qw/69 60/],       [qw/69 60 62/],
+            [qw/60 62/],
+        ],
+        "expected subsets"
+    );
+#   use Data::Dumper; diag Dumper \%possibles;
+}
+
+plan tests => 30;

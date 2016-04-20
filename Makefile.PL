@@ -1,5 +1,4 @@
 
-
 use 5.010000;
 
 use strict;
@@ -32,6 +31,7 @@ my %params = (
     },
     PREREQ_PM => {
         'Carp'                   => 0,
+        'List::Util'             => 0,
         'Math::Random::Discrete' => 0,
         'Moo'                    => 0,
         'namespace::clean'       => 0,

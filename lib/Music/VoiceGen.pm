@@ -11,12 +11,13 @@ use strict;
 use warnings;
 
 use Carp qw(croak);
+use List::Util qw(min);
 use Math::Random::Discrete;
 use Moo;
 use namespace::clean;
 use Scalar::Util qw(looks_like_number);
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 has _choices => ( is => 'rwp', );
 has _context => (
@@ -124,6 +125,17 @@ sub rand {
     $self->context($context);
 
     return $choice;
+}
+
+sub subsets {
+    my ( $self, $min, $max, $fn, $list ) = @_;
+    $list = [ @_[4.. $#_ ] ] if ref $list ne 'ARRAY';
+    for my $lo ( 0 .. @$list - $min ) {
+        for my $hi ( $lo + $min - 1 .. min( $lo + $max - 1, $#$list ) ) {
+            $fn->( @$list[ $lo .. $hi ] );
+        }
+    }
+    return $self;
 }
 
 sub update {
@@ -363,6 +375,23 @@ Returns the object, so can be chained with other method calls.
 Takes no arguments. Returns a random pitch, perhaps adjusted by any
 B<context>, otherwise when lacking B<context> picking with an equal
 chance from any of the B<pitches> or top-level B<possibles> supplied.
+
+=item B<subsets> I<min> I<max> I<coderef> I<list>
+
+Utility method, calls the given I<coderef> with each of the I<min> to
+I<max> element subsets of the given I<list>. In particular, this can be
+used to generate B<possibles> from a given musical voice. For example,
+assuming a B<MAX_CONTEXT> of 3, all possibles from one to three notes
+plus the destination pitch could be tallied via:
+
+  my %poss;
+  $voice->subsets(
+      2, 4, sub { $poss{ join ".", @_[0..$#_-1] }{ $_[-1] }++ },
+      [qw/65 67 69 60 62/]
+  );
+  use Data::Dumper; print Dumper \%poss;
+
+Returns the object, so can be chained with other method calls.
 
 =item B<update> I<possibles> [ preserve_pitches => 1 ]
 

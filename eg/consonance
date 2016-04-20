@@ -9,12 +9,13 @@ use strict;
 use warnings;
 
 use MIDI;
-sub CHANNEL () { 0 }
 sub NO_VELO () { 0 }
 
 use Music::VoiceGen;
 use Music::Tension::Cope;
 my $tension = Music::Tension::Cope->new;
+
+my $midiname = shift // 'out.midi';
 
 # TWEAK, TWEAK, TWEAK, TWEAK
 # how long to go on for
@@ -35,12 +36,12 @@ my @voices = (
         weightfn  => \&weighty,
     ),
     Music::VoiceGen->new(
-        pitches   => [qw/57 59 60 62 64 65 67 69/],
+        pitches   => [qw/57 59 60 62 64 65 67 69 71 72/],
         intervals => \@intervals,
         weightfn  => \&weighty,
     ),
     Music::VoiceGen->new(
-        pitches   => [qw/48 50 52 53 55 57 59 60 62/],
+        pitches   => [qw/48 50 52 53 55 57 59 60 62 64/],
         intervals => \@intervals,
         weightfn  => \&weighty,
     ),
@@ -61,9 +62,6 @@ for my $trialn ( 1 .. $TRIALS ) {
         for my $note ( 0 .. $BEATS - 1 ) {
             push @melody, $voices[$voicen]->rand;
         }
-        # TWEAK mutation - except any chromatics are usually not handled
-        # properly and thus distracting
-        #mutate( \@melody ) unless $voicen == $#voices;
         push @phrase, \@melody;
     }
     # scoring function really needs a "vertically oriented pitch set"
@@ -83,9 +81,13 @@ melodize( \@best_phrase );
 midi_out( \@best_phrase );
 exit;
 
+sub fudge_passing_odds {
+    -1 * sin( -4 * $_[0]**2 ) / 3;
+}
+
 sub get_patch {
     # TWEAK what midi patch to use for what voice
-    my @patches = qw/42 42 42 42/;
+    my @patches = qw/0 0 0 0/;
     state $patchno = 0;
     return $patches[ $patchno++ ] // 0;
 }
@@ -110,13 +112,19 @@ sub melodize {
             my @between = pitches_between( \%pitch2index, \@pitches, $voice->[$noten],
                 $voice->[ $noten + 1 ] );
             # ... and all that fuss just to sometimes play passing notes
-            if ( @between == 1 and rand() / 2 < $notefreq{ $between[0] } ) {
+            if ( @between == 1
+                and rand() <
+                $notefreq{ $between[0] } + fudge_passing_odds( $noten / $#$voice ) ) {
                 $voice->[$noten] = [ $voice->[$noten], $between[0] ];
             }
-            if ( @between == 2 and rand() < $notefreq{ $between[0] } ) {
+            if ( @between == 2
+                and rand() * 2 <
+                $notefreq{ $between[0] } + fudge_passing_odds( $noten / $#$voice ) ) {
                 $voice->[$noten] = [ $voice->[$noten], [ @between[ 0, 1 ] ] ];
             }
-            if ( @between == 3 and rand() < $notefreq{ $between[0] } ) {
+            if ( @between == 3
+                and rand() * 4 <
+                $notefreq{ $between[0] } + fudge_passing_odds( $noten / $#$voice ) ) {
                 $voice->[$noten] = [ [ $voice->[$noten], $between[0] ], [ @between[ 1, 2 ] ] ];
             }
         }
@@ -126,31 +134,22 @@ sub melodize {
 sub midi_out {
     my ($phrase) = @_;
     my @tracks;
-    for my $voice (@$phrase) {
+    for my $voicen ( 0 .. $#$phrase ) {
         my $track = MIDI::Track->new;
         # TWEAK track-level MIDI details
-        $track->new_event( 'set_tempo', 0, 500000 );
-        $track->new_event( 'patch_change', 0, 0, get_patch() );
-        for my $note (@$voice) {
+        my $channel = $voicen;
+        $track->new_event( 'set_tempo', 0, 750000 ) if $voicen == 0;
+        $track->new_event( 'patch_change', 0, $channel, get_patch() );
+        for my $note ( @{ $phrase->[$voicen] } ) {
             # duration should be evenly divisible by 2 over a few divisions
             # (depending on what melodize does). stattaco or sustain can
             # be adjusted through the percent
-            note_out( $track, $note, 888, 0.31 );
+            note_out( $track, $channel, $note, 384 * 2, 0.85 );
         }
         push @tracks, $track;
     }
     my $opus = MIDI::Opus->new( { ticks => 384, tracks => \@tracks } );
-    $opus->write_to_file('out.midi');
-}
-
-sub mutate {
-    my ($melody) = @_;
-    # TWEAK mutation odds. Or disable it!
-    for my $note (@$melody) {
-        if ( rand() < 0.02 ) {
-            $note += rand() > 0.5 ? 1 : -1;
-        }
-    }
+    $opus->write_to_file($midiname);
 }
 
 sub nonzerorand {
@@ -160,20 +159,20 @@ sub nonzerorand {
 }
 
 sub note_out {
-    my ( $track, $note, $duration, $percent ) = @_;
+    my ( $track, $channel, $note, $duration, $percent ) = @_;
     if ( ref $note eq 'ARRAY' ) {
         for my $subnote (@$note) {
-            note_out( $track, $subnote, int( $duration / 2 ), $percent );
+            note_out( $track, $channel, $subnote, int( $duration / 2 ), $percent );
         }
     } else {
         my $reals_duration = int( $duration * $percent );
         my $remainder      = $duration - $reals_duration;
         # TWEAK MIDI note details. The velocity, or volume, in particular
-        $track->new_event( 'note_on', 0, CHANNEL, $note, 89 + int rand 17 );
-        $track->new_event( 'note_off', $reals_duration, CHANNEL, $note, NO_VELO );
+        $track->new_event( 'note_on', 0, $channel, $note, 89 + int rand 17 );
+        $track->new_event( 'note_off', $reals_duration, $channel, $note, NO_VELO );
         if ( $remainder > 0 ) {
-            $track->new_event( 'note_on',  0,          CHANNEL, $note, NO_VELO );
-            $track->new_event( 'note_off', $remainder, CHANNEL, $note, NO_VELO );
+            $track->new_event( 'note_on',  0,          $channel, $note, NO_VELO );
+            $track->new_event( 'note_off', $remainder, $channel, $note, NO_VELO );
         }
     }
 }
@@ -211,14 +210,28 @@ sub score_vops {
 
 sub weighty {
     my ( $from, $to, $interval ) = @_;
-    # TWEAK desc intervals more common
-    my $fudge = $interval < 0 ? 3.3 : 1;
-    # favor smaller intervals
-    my $odds =
-      1 / abs( $interval || 1 ) * $fudge * ( nonzerorand() / 7 );
-    # disfavor oblique motion (repeated notes)
-    $odds /= 13 if $interval == 0;
-    return $odds;
+    # TWEAK desc intervals more common, favor thirds for chance of
+    # passing notes from melodize
+    my %intervals = (
+        -12 => 1,
+        -8  => 1,
+        -7  => 4,
+        -5  => 10,
+        -4  => 20,
+        -3  => 20,
+        -2  => 12,
+        -1  => 12,
+        0   => 1,
+        1   => 10,
+        2   => 10,
+        3   => 15,
+        4   => 15,
+        5   => 8,
+        7   => 2,
+        8   => 1,
+        12  => 1,
+    );
+    return $intervals{$interval} // die "no such interval $interval";
 }
 
 # NOTE this probably should be two scripts, one that does the voice-
