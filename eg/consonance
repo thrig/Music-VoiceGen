@@ -7,6 +7,7 @@
 use 5.10.0;
 use strict;
 use warnings;
+use List::Util qw(min max);
 
 use MIDI;
 sub NO_VELO () { 0 }
@@ -19,7 +20,7 @@ my $midiname = shift // 'out.midi';
 
 # TWEAK, TWEAK, TWEAK, TWEAK
 # how long to go on for
-my $BEATS = 128;
+my $BEATS = 64;
 
 # how long to look for more consonant phrases (lower if CPU slow)
 my $TRIALS = 1e4;
@@ -46,7 +47,7 @@ my @voices = (
         weightfn  => \&weighty,
     ),
     Music::VoiceGen->new(
-        pitches   => [qw/41 43 45 47 48 50 52 53 55 57/],
+        pitches   => [qw/41 43 45 47 48 50 52 53 55/],
         intervals => \@intervals,
         weightfn  => \&weighty,
     ),
@@ -55,25 +56,36 @@ my @voices = (
 my ( @best_phrase, $best_score );
 $best_score = ~0;
 
-for my $trialn ( 1 .. $TRIALS ) {
-    my @phrase;
-    for my $voicen ( 0 .. $#voices ) {
-        my @melody;
-        for my $note ( 0 .. $BEATS - 1 ) {
-            push @melody, $voices[$voicen]->rand;
+{
+    my $do_abort = 0;
+    local $SIG{INT} = sub { $do_abort = 1 };
+    for my $trialn ( 1 .. $TRIALS ) {
+        my @phrase;
+        for my $voicen ( 0 .. $#voices ) {
+            my @melody;
+            for my $note ( 0 .. $BEATS - 1 ) {
+                push @melody, $voices[$voicen]->rand;
+            }
+            push @phrase, \@melody;
         }
-        push @phrase, \@melody;
-    }
-    # scoring function really needs a "vertically oriented pitch set"
-    # which some of you may recognize as a "chord"
-    my @vops;
-    for my $note ( 0 .. $#{ $phrase[0] } ) {
-        push @vops, [ sort { $a <=> $b } map { $phrase[$_][$note] } 0 .. $#phrase ];
-    }
-    my $score = score_vops( \@vops );
-    if ( $score < $best_score ) {
-        @best_phrase = @phrase;
-        $best_score  = $score;
+        # scoring function really needs a "vertically oriented pitch set"
+        # which some of you may recognize as a "chord"
+        my @vops;
+        for my $note ( 0 .. $#{ $phrase[0] } ) {
+            push @vops, [ sort { $a <=> $b } map { $phrase[$_][$note] } 0 .. $#phrase ];
+        }
+        my $score = score_vops( \@vops, $trialn );
+        if ( $score < $best_score ) {
+            @best_phrase = @phrase;
+            $best_score  = $score;
+        }
+        if ( $trialn % 1000 == 0 ) {
+            warn "$trialn best $best_score\n";
+        }
+        if ( $do_abort == 1 ) {
+            warn "going with best $best_score as of $trialn\n";
+            last;
+        }
     }
 }
 
@@ -81,8 +93,10 @@ melodize( \@best_phrase );
 midi_out( \@best_phrase );
 exit;
 
+# TWEAK plot over 0 to 1, used in melodize and to set note velocity as
+# function of percent of length of phrase
 sub fudge_passing_odds {
-    -1 * sin( -4 * $_[0]**2 ) / 3;
+    sin( -9.5 * $_[0]**2 ) / -4 + sin( -11 * $_[0] ) / -8 + 0.17;
 }
 
 sub get_patch {
@@ -113,17 +127,17 @@ sub melodize {
                 $voice->[ $noten + 1 ] );
             # ... and all that fuss just to sometimes play passing notes
             if ( @between == 1
-                and rand() <
+                and rand() / 2 <
                 $notefreq{ $between[0] } + fudge_passing_odds( $noten / $#$voice ) ) {
                 $voice->[$noten] = [ $voice->[$noten], $between[0] ];
             }
             if ( @between == 2
-                and rand() * 2 <
+                and rand() * 1.5 <
                 $notefreq{ $between[0] } + fudge_passing_odds( $noten / $#$voice ) ) {
                 $voice->[$noten] = [ $voice->[$noten], [ @between[ 0, 1 ] ] ];
             }
             if ( @between == 3
-                and rand() * 4 <
+                and rand() * 3 <
                 $notefreq{ $between[0] } + fudge_passing_odds( $noten / $#$voice ) ) {
                 $voice->[$noten] = [ [ $voice->[$noten], $between[0] ], [ @between[ 1, 2 ] ] ];
             }
@@ -140,11 +154,21 @@ sub midi_out {
         my $channel = $voicen;
         $track->new_event( 'set_tempo', 0, 750000 ) if $voicen == 0;
         $track->new_event( 'patch_change', 0, $channel, get_patch() );
-        for my $note ( @{ $phrase->[$voicen] } ) {
+        for my $noten ( 0 .. $#{ $phrase->[$voicen] } ) {
             # duration should be evenly divisible by 2 over a few divisions
             # (depending on what melodize does). stattaco or sustain can
             # be adjusted through the percent
-            note_out( $track, $channel, $note, 384 * 2, 0.85 );
+            note_out(
+                $track, $channel,
+                $phrase->[$voicen][$noten],
+                384 * 2,
+                0.85,
+                min(120,
+                    max(60,
+                        65 + 90 * fudge_passing_odds( $noten / $#{ $phrase->[$voicen] } ) + int rand 15
+                    )
+                )
+            );
         }
         push @tracks, $track;
     }
@@ -152,24 +176,20 @@ sub midi_out {
     $opus->write_to_file($midiname);
 }
 
-sub nonzerorand {
-    my $x = 0;
-    $x = rand() while $x == 0;
-    return $x;
-}
-
 sub note_out {
-    my ( $track, $channel, $note, $duration, $percent ) = @_;
+    my ( $track, $channel, $note, $duration, $percent, $velo ) = @_;
     if ( ref $note eq 'ARRAY' ) {
         for my $subnote (@$note) {
-            note_out( $track, $channel, $subnote, int( $duration / 2 ), $percent );
+            note_out( $track, $channel, $subnote, int( $duration / 2 ), $percent, $velo );
         }
     } else {
         my $reals_duration = int( $duration * $percent );
         my $remainder      = $duration - $reals_duration;
         # TWEAK MIDI note details. The velocity, or volume, in particular
-        $track->new_event( 'note_on', 0, $channel, $note, 89 + int rand 17 );
+        $track->new_event( 'note_on', 0, $channel, $note, $velo );
         $track->new_event( 'note_off', $reals_duration, $channel, $note, NO_VELO );
+        # this is perhaps easier than passing a remainder around to use
+        # as the dtime for the next note_on event...
         if ( $remainder > 0 ) {
             $track->new_event( 'note_on',  0,          $channel, $note, NO_VELO );
             $track->new_event( 'note_off', $remainder, $channel, $note, NO_VELO );
@@ -188,11 +208,11 @@ sub pitches_between {
 }
 
 sub score_vops {
-    my ($vops) = @_;
+    my ( $vops, $trialn ) = @_;
     # TWEAK could change scoring, etc
     my %scores = (
-        rootmotion => { weight => 2, score => 0 },
-        vertical   => { weight => 1, score => 0 },
+        rootmotion => { weight => 0.5, score => 0 },
+        vertical   => { weight => 2,   score => 0 },
     );
     for my $chordn ( 0 .. $#$vops ) {
         $scores{vertical}->{score} += $tension->vertical( $vops->[$chordn] );
@@ -205,6 +225,9 @@ sub score_vops {
     for my $sr ( values %scores ) {
         $score += $sr->{weight} * $sr->{score};
     }
+    #   if ($trialn % 1000 == 0) {
+    #     use Data::Dumper::Concise::Aligned; warn DumperA score => \%scores;
+    #   }
     return $score;
 }
 
@@ -219,13 +242,13 @@ sub weighty {
         -5  => 10,
         -4  => 20,
         -3  => 20,
-        -2  => 12,
-        -1  => 12,
+        -2  => 15,
+        -1  => 15,
         0   => 1,
-        1   => 10,
-        2   => 10,
-        3   => 15,
-        4   => 15,
+        1   => 9,
+        2   => 9,
+        3   => 14,
+        4   => 14,
         5   => 8,
         7   => 2,
         8   => 1,
