@@ -143,6 +143,40 @@ dies_ok( sub { Music::VoiceGen->new }, 'no params set' );
     $deeply->( \@pitches, [qw/65 67 65 -1/], "a cycle" );
 }
 
+# startfn, contextfn
+{
+    my $fvg = Music::VoiceGen->new(
+        pitches     => [ 1 .. 100 ],
+        intervals   => [-1],
+        MAX_CONTEXT => 8,
+        startfn     => sub { die "what does this little red button do?" },
+    );
+    throws_ok { $fvg->rand } qr/what does this little red button do\?/, 'boom';
+
+    $fvg->startfn( sub { 42 } );
+    is( $fvg->rand, 42, 'a proper start' );
+
+    $fvg->contextfn(
+        sub {
+            my ( $choice, $mrd, $count ) = @_;
+            return 9 + $count, 0;
+        }
+    );
+    $fvg->context( [9] );
+    $fvg->update(
+        {   "9"       => { 42 => 1 },
+            "9.10"    => { 42 => 1 },
+            "10"      => { 42 => 1 },
+            "9.10.11" => { 42 => 1 },
+            "10.11"   => { 42 => 1 },
+            "11"      => { 42 => 1 },
+        }
+    );
+    is( $fvg->rand, 10, 'Custom Context IV' );
+    is( $fvg->rand, 11, 'Custom Context V' );
+    is( $fvg->rand, 12, 'Custom Context VI' );
+}
+
 # subsets!
 {
     my $svg = Music::VoiceGen->new( possibles => { 1 => { 1 => 1 } } );
@@ -151,7 +185,7 @@ dies_ok( sub { Music::VoiceGen->new }, 'no params set' );
         2, 4,
         sub {
             push @subsets, \@_;
-#           $possibles{ join ".", @_[0..$#_-1] }{$_[-1]}++;
+            #           $possibles{ join ".", @_[0..$#_-1] }{$_[-1]}++;
         },
         [qw/65 67 69 60 62/],
     );
@@ -163,7 +197,7 @@ dies_ok( sub { Music::VoiceGen->new }, 'no params set' );
         ],
         "expected subsets"
     );
-#   use Data::Dumper; diag Dumper \%possibles;
+    #   use Data::Dumper; diag Dumper \%possibles;
 }
 
-plan tests => 30;
+plan tests => 35;

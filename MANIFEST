@@ -3,6 +3,8 @@ LICENSE
 MANIFEST
 Makefile.PL
 README
+eg/auditcontext
+eg/consonance
 lib/Music/VoiceGen.pm
 t/00-load.t
 t/Music-VoiceGen.t

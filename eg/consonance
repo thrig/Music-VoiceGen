@@ -1,13 +1,17 @@
 #!/usr/bin/env perl
 #
-#     perl consonance
+#     perl consonance out.midi 2>&1 | tee iter.log
 #   should result in an out.midi
 # below here look for things to TWEAK
+#
+#     awk '/^ITER/{print $2,$5}' iter.log | r-fu --width=12 xy - out.pdf; open out.pdf
+#  will graph the progress from iter.log.
 
 use 5.10.0;
 use strict;
 use warnings;
 use List::Util qw(min max);
+use List::UtilsBy qw(nsort_by);
 
 use MIDI;
 sub NO_VELO () { 0 }
@@ -22,8 +26,8 @@ my $midiname = shift // 'out.midi';
 # how long to go on for
 my $BEATS = 64;
 
-# how long to look for more consonant phrases (lower if CPU slow)
-my $TRIALS = 1e4;
+my $ITERATIONS = 1000;
+my $TRIALS     = 500;
 
 # allowed intervals
 my @intervals = qw/0 1 2 3 3 4 5 7 8 12 -1 -2 -3 -4 -5 -7 -8 -12/;
@@ -32,33 +36,43 @@ my @intervals = qw/0 1 2 3 3 4 5 7 8 12 -1 -2 -3 -4 -5 -7 -8 -12/;
 # soprano[0] and bass[-1], if you need voice specific rules
 my @voices = (
     Music::VoiceGen->new(
-        pitches   => [qw/65 67 69 71 72 74 76 77 79 81/],
-        intervals => \@intervals,
-        weightfn  => \&weighty,
+        pitches     => [qw/65 67 69 71 72 74 76 77 79 81/],
+        intervals   => \@intervals,
+        MAX_CONTEXT => 3,
+        contextfn   => \&contextfn,
+        weightfn    => \&weighty,
     ),
     Music::VoiceGen->new(
-        pitches   => [qw/57 59 60 62 64 65 67 69 71 72/],
-        intervals => \@intervals,
-        weightfn  => \&weighty,
+        pitches     => [qw/57 59 60 62 64 65 67 69 71 72/],
+        intervals   => \@intervals,
+        MAX_CONTEXT => 3,
+        contextfn   => \&contextfn,
+        weightfn    => \&weighty,
     ),
     Music::VoiceGen->new(
-        pitches   => [qw/48 50 52 53 55 57 59 60 62 64/],
-        intervals => \@intervals,
-        weightfn  => \&weighty,
+        pitches     => [qw/48 50 52 53 55 57 59 60 62 64/],
+        intervals   => \@intervals,
+        MAX_CONTEXT => 3,
+        contextfn   => \&contextfn,
+        weightfn    => \&weighty,
     ),
     Music::VoiceGen->new(
-        pitches   => [qw/41 43 45 47 48 50 52 53 55/],
-        intervals => \@intervals,
-        weightfn  => \&weighty,
+        pitches     => [qw/41 43 45 47 48 50 52 53 55/],
+        intervals   => \@intervals,
+        MAX_CONTEXT => 3,
+        contextfn   => \&contextfn,
+        weightfn    => \&weighty,
     ),
 );
 
-my ( @best_phrase, $best_score );
+my ( $best_phrase, $best_score );
 $best_score = ~0;
 
-{
-    my $do_abort = 0;
-    local $SIG{INT} = sub { $do_abort = 1 };
+my $abort = 0;
+$SIG{INT} = sub { $abort = 1 };
+
+for my $iter ( 1 .. $ITERATIONS ) {
+    my @results;
     for my $trialn ( 1 .. $TRIALS ) {
         my @phrase;
         for my $voicen ( 0 .. $#voices ) {
@@ -74,24 +88,46 @@ $best_score = ~0;
         for my $note ( 0 .. $#{ $phrase[0] } ) {
             push @vops, [ sort { $a <=> $b } map { $phrase[$_][$note] } 0 .. $#phrase ];
         }
-        my $score = score_vops( \@vops, $trialn );
-        if ( $score < $best_score ) {
-            @best_phrase = @phrase;
-            $best_score  = $score;
-        }
-        if ( $trialn % 1000 == 0 ) {
-            warn "$trialn best $best_score\n";
-        }
-        if ( $do_abort == 1 ) {
-            warn "going with best $best_score as of $trialn\n";
-            last;
+        push @results, [ score_vops( \@vops, $trialn ), \@phrase ];
+        last if $abort;
+    }
+
+    # TWEAK this selects the top N% to update the possibles with.
+    # Simulated annealing did not work out so well (garbage in...) so
+    # easier and faster to pick a set amount of the best results.
+    @results = ( nsort_by { $_->[0] } @results )[ 0 .. $#results * 0.1 ];
+    for my $phrase ( map { $_->[1] } @results ) {
+        for my $voicen ( 0 .. $#$phrase ) {
+            my $possibles = $voices[$voicen]->possibles;
+            $voices[$voicen]->subsets( 2, 4,
+                sub { $possibles->{ join ".", @_[ 0 .. $#_ - 1 ] }{ $_[-1] } += 0.1 },
+                $phrase->[$voicen] );
+            $voices[$voicen]->update($possibles);
         }
     }
+
+    if ( $results[0][0] <= $best_score ) {
+        $best_phrase = [ @{ $results[0][1] } ];
+        $best_score  = $results[0][0];
+    }
+
+    warn sprintf "ITER %d BEST score %.2f of %.2f\n", $iter,
+      $results[0][0], $best_score;
+    last if $abort;
 }
 
-melodize( \@best_phrase );
-midi_out( \@best_phrase );
+melodize($best_phrase);
+midi_out($best_phrase);
+
 exit;
+
+sub contextfn {
+    my ( $choice, $mrd, $count ) = @_;
+    if ( CORE::rand( $count + ( $count - 1 ) / 2 ) < 1 ) {
+        $choice = $mrd->rand;
+    }
+    return $choice, 0;
+}
 
 # TWEAK plot over 0 to 1, used in melodize and to set note velocity as
 # function of percent of length of phrase
@@ -162,10 +198,11 @@ sub midi_out {
                 $track, $channel,
                 $phrase->[$voicen][$noten],
                 384 * 2,
-                0.85,
+                ( 71 + int rand 17 ) / 100,
                 min(120,
-                    max(60,
-                        65 + 90 * fudge_passing_odds( $noten / $#{ $phrase->[$voicen] } ) + int rand 15
+                    max(40,
+                        50 + 110 * fudge_passing_odds( $noten / $#{ $phrase->[$voicen] } ) +
+                          int rand 15
                     )
                 )
             );

@@ -26,6 +26,16 @@ has _context => (
     coerce  => sub { ref $_[0] eq 'ARRAY' ? $_[0] : \@_ },
     default => sub { [] },
 );
+has contextfn => (
+    is  => 'rw',
+    isa => sub {
+        die "context function must be a code ref"
+          unless defined $_[0] and ref $_[0] eq 'CODE';
+    },
+    default => sub {
+        sub { $_[1]->rand, 1 }
+    },
+);
 has intervals => ( is => 'rwp', );
 has MAX_CONTEXT => (
     is     => 'rw',
@@ -41,7 +51,20 @@ has MAX_CONTEXT => (
     },
 );
 has pitches   => ( is => 'rwp', );
+# NOTE use the ->update method to set these after ->new
 has possibles => ( is => 'rwp', );
+has startfn   => (
+    is  => 'rw',
+    isa => sub {
+        die "start function must be a code ref"
+          unless defined $_[0] and ref $_[0] eq 'CODE';
+    },
+    default => sub {
+        sub {
+            $_[0]->[ CORE::rand @{ $_[0] } ];
+        };
+    },
+);
 
 sub BUILD {
     my ( $self, $param ) = @_;
@@ -107,19 +130,22 @@ sub rand {
     if ( !@$context ) {
         my @possibles = keys %{ $self->possibles };
         croak "no keys in possibles" if !@possibles;
-        $choice = $possibles[ rand @possibles ];
+        $choice = $self->startfn->( \@possibles );
     } else {
+        my $count = 1;
         for my $i ( 0 .. $#$context ) {
             my $key = join ".", @$context[ $i .. $#$context ];
             if ( exists $choices->{$key} ) {
-                $choice = $choices->{$key}->rand;
-                last if defined $choice;
+                ( $choice, my $abort ) =
+                  $self->contextfn->( $choice, $choices->{$key}, $count );
+                last if $abort;
+                $count++;
             }
         }
     }
 
     # see "Known Issues" in docs for ideas on how to workaround
-    die "could not find a choice" if !defined $choice;
+    croak "could not find a choice" if !defined $choice;
 
     push @$context, $choice;
     $self->context($context);
@@ -129,7 +155,8 @@ sub rand {
 
 sub subsets {
     my ( $self, $min, $max, $fn, $list ) = @_;
-    $list = [ @_[4.. $#_ ] ] if ref $list ne 'ARRAY';
+    croak "subsets needs min,max,coderef,list" if @_ < 5;
+    $list = [ @_[ 4 .. $#_ ] ] if ref $list ne 'ARRAY';
     for my $lo ( 0 .. @$list - $min ) {
         for my $hi ( $lo + $min - 1 .. min( $lo + $max - 1, $#$list ) ) {
             $fn->( @$list[ $lo .. $hi ] );
@@ -260,6 +287,29 @@ B<MAX_CONTEXT> attribute, and only relevant if the B<possibles> take
 context into account. Use instead the B<context> or B<clear_context>
 methods to interact with the contents of this attribute.
 
+=item B<contextfn>
+
+A code reference that is called by B<rand> when B<_context> is
+available, arguments being the previous choice (which will be B<undef>
+on the first call), a L<Math::Random::Discrete> object, and a counter
+that indicates how many times the B<contextfn> has been called inside
+this B<rand> call. Return values should be the choice, and a boolean
+that if true will stop the loop through available B<_context>. The
+following example shows a weighted sampling algorithm (see the "random
+line" entry in L<perlfaq5> for background) that prefers to use a
+selection from the longest context, but may sometimes instead use a
+choice from a shorter context chain.
+
+  $voice->contextfn(
+      sub {
+          my ( $choice, $mrd, $count ) = @_;
+          if ( CORE::rand( $count + ( $count - 1 ) / 2 ) < 1 ) {
+              $choice = $mrd->rand;
+          }
+          return $choice, 0;
+      }
+  );
+
 =item B<intervals>
 
 A list of allowed intervals a voice is allowed to make, by positive and
@@ -294,6 +344,13 @@ How many B<context> notes to retain (1 by default). Higher values will
 have no effect (save for burning needless CPU cycles) unless appropriate
 B<possibles> have been supplied.
 
+=item B<startfn>
+
+A code reference called by B<rand> when there is no available
+B<_context>. This call is passed a list of possible starting items as a
+list reference, and should return a value in that list to be used as the
+starting point.
+
 =item B<pitches>
 
 What pitches are allowed for the voice, in semitones as integers. The
@@ -318,15 +375,12 @@ will not be set if custom B<possibles> are passed to B<new>.
 =item B<possibles>
 
 The possible choices for what pitches can be reached from a given pitch,
-with weights, as an alternative to this same information being generated
-from given B<pitches> and B<intervals>. This form will be more likely to
-be used once starting weights for a given set of B<pitches> and
-B<intervals> has been generated, and new values are being loaded after
-scoring or other analysis has been done to change the weights.
+with weights. Consider it read-only once the object has been created;
+changes to B<possibles> should be made via the B<update> method.
 
-Note that the keys for the possibilities need not be integers; they
-could be note names or whatever. This is in contrast to B<pitches> and
-B<intervals>, which must be integers.
+  my $p = $voice->possibles;
+  # ... alter $p as necessary ...
+  $voice->update($p);
 
 B<possibles> may make use of B<context> by providing choices for dot-
 joined strings of other possibilities:
@@ -344,10 +398,11 @@ joined strings of other possibilities:
 
 In this case, C<60.65> and not C<65> would be used by the next call to
 B<rand>, as that is a more specific choice. If a more specific choice is
-not available, then B<rand> will eventually fall back to using the
-(hopefully present!) most recent pitch number. If there is B<context>,
-and no pitch can be used, then B<rand> will die with an exception. This
-is a known issue.
+not available, then B<rand> will fall back to using shorter and shorter
+chains. This behavior can be changed via the B<contextfn> attribute.
+
+If there is B<context>, and no pitch can be used, then B<rand> will die
+with an exception. This is a known issue.
 
 =back
 
@@ -374,7 +429,9 @@ Returns the object, so can be chained with other method calls.
 
 Takes no arguments. Returns a random pitch, perhaps adjusted by any
 B<context>, otherwise when lacking B<context> picking with an equal
-chance from any of the B<pitches> or top-level B<possibles> supplied.
+chance from any of the B<pitches> or top-level B<possibles> supplied,
+unless the default B<startfn> or B<contextfn> attributes have be
+overridden and instructed to behave otherwise.
 
 =item B<subsets> I<min> I<max> I<coderef> I<list>
 
@@ -421,12 +478,12 @@ L<https://github.com/thrig/Music-VoiceGen>
 It is fairly easy to trigger the "could not find a choice" error should
 a particular pitch be a dead end (when there are no allowed intervals
 leading from a pitch to any other allowed pitch), or if C<undef> has
-gotten into the B<possibles> or B<context> attributes. As a workaround,
-inspect the contents of the relevant attributes and remove or fix any
-such problems, e.g. from any dead-end pitches return a "stop" value that
-causes the calling code to not make additional calls to B<rand>.
+gotten into the B<possibles> attribute. As a workaround, inspect the
+contents of the relevant attributes and remove or fix any such problems,
+e.g. for any dead-end pitches return a "stop" value that causes the
+calling code to not make additional calls to B<rand>.
 
-  $voice->update( { 66 => { -1 => 1 }, ... }
+  $voice->update( { 66 => { -1 => 1 }, ... } );
 
   # and elsewhere...
   while ($something) {
@@ -434,10 +491,9 @@ causes the calling code to not make additional calls to B<rand>.
       last if $pitch == -1;
   }
 
-Also, if there are possibilities at depth, these will always be used.
-There may be a need to randomize this (sometimes choosing from a less
-specific set), or to combine the options for "65", "60.65", and so
-forth somehow.
+Also, if there are possibilities at depth, these will always be used,
+unless a custom B<contextfn> is supplied to sometimes not always select
+from the chain of most context.
 
 =head1 SEE ALSO
 
