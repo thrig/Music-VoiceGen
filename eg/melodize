@@ -1,0 +1,150 @@
+#!/usr/bin/env perl
+#
+# Melodizes a phrase (array of array of pitch numbers encoded as JSON),
+# for example the output of the consonance script.
+#
+#   perl eg/melodize eg/out.midi < eg/out.json
+
+use 5.10.0;
+use strict;
+use warnings;
+
+use JSON::MaybeXS;
+use List::Util qw(min max);
+use MIDI;
+
+sub NO_VELO () { 0 }
+
+my $midiname = shift // 'out.midi';
+
+my $best_phrase = decode_json(
+    do { local $/ = undef; readline *STDIN }
+);
+
+melodize($best_phrase);
+midi_out($best_phrase);
+
+exit;
+
+# TWEAK plot over 0 to 1, used in melodize and to set note velocity as
+# function of percent of length of phrase
+sub fudge_passing_odds {
+    my ( $x, $n ) = @_;
+    sin( 10 * ( $x - ( 7 + $n / 10 ) ) ) / 8 +
+      sin( 600 * $x ) / 100 +
+      cos( 30 * ( $x - 3 ) ) / 8 + 0.2;
+}
+
+sub get_patch {
+    # TWEAK what midi patch to use for what voice
+    my @patches = qw/0 0 0 0/;
+    state $patchno = 0;
+    return $patches[ $patchno++ ] // 0;
+}
+
+sub melodize {
+    my ($phrase) = @_;
+    for my $voicen ( 0 .. $#$phrase ) {
+        my ( %notefreq, %pitch2index );
+        my $freqsum = 0;
+        for my $n ( @{ $phrase->[$voicen] } ) {
+            $notefreq{$n}++;
+            $freqsum++;
+        }
+        for my $v ( values %notefreq ) {
+            $v /= $freqsum;
+        }
+        my @pitches = sort { $a <=> $b } keys %notefreq;
+        for my $i ( 0 .. $#pitches ) {
+            $pitch2index{ $pitches[$i] } = $i;
+        }
+        for my $noten ( 0 .. $#{ $phrase->[$voicen] } - 1 ) {
+            my @between = pitches_between(
+                \%pitch2index, \@pitches,
+                $phrase->[$voicen][$noten],
+                $phrase->[$voicen][ $noten + 1 ]
+            );
+            # ... and all that fuss just to sometimes play passing notes
+            if ( @between == 1
+                and rand() / 2 < $notefreq{ $between[0] } +
+                fudge_passing_odds( $noten / $#{ $phrase->[$voicen] }, $voicen ) ) {
+                $phrase->[$voicen][$noten] = [ $phrase->[$voicen][$noten], $between[0] ];
+            }
+            if ( @between == 2
+                and rand() < $notefreq{ $between[0] } +
+                fudge_passing_odds( $noten / $#{ $phrase->[$voicen] }, $voicen ) ) {
+                $phrase->[$voicen][$noten] =
+                  [ $phrase->[$voicen][$noten], [ @between[ 0, 1 ] ] ];
+            }
+            if ( @between == 3
+                and rand() * 2 < $notefreq{ $between[0] } +
+                fudge_passing_odds( $noten / $#{ $phrase->[$voicen] }, $voicen ) ) {
+                $phrase->[$voicen][$noten] =
+                  [ [ $phrase->[$voicen][$noten], $between[0] ], [ @between[ 1, 2 ] ] ];
+            }
+        }
+    }
+}
+
+sub midi_out {
+    my ($phrase) = @_;
+    my @tracks;
+    for my $voicen ( 0 .. $#$phrase ) {
+        my $track = MIDI::Track->new;
+        # TWEAK track-level MIDI details
+        my $channel = $voicen;
+        $track->new_event( 'set_tempo', 0, 750000 ) if $voicen == 0;
+        $track->new_event( 'patch_change', 0, $channel, get_patch() );
+        for my $noten ( 0 .. $#{ $phrase->[$voicen] } ) {
+            # duration should be evenly divisible by 2 over a few divisions
+            # (depending on what melodize does). stattaco or sustain can
+            # be adjusted through the percent
+            note_out(
+                $track, $channel,
+                $phrase->[$voicen][$noten],
+                384 * 2,
+                ( 71 + int rand 17 ) / 100,
+                min(120,
+                    max(40,
+                        50 + 110 * fudge_passing_odds( $noten / $#{ $phrase->[$voicen] }, $voicen ) +
+                          int rand 15
+                    )
+                )
+            );
+        }
+        push @tracks, $track;
+    }
+    my $opus = MIDI::Opus->new( { ticks => 384, tracks => \@tracks } );
+    $opus->write_to_file($midiname);
+}
+
+sub note_out {
+    my ( $track, $channel, $note, $duration, $percent, $velo ) = @_;
+    if ( ref $note eq 'ARRAY' ) {
+        for my $subnote (@$note) {
+            note_out( $track, $channel, $subnote, int( $duration / 2 ), $percent, $velo );
+        }
+    } else {
+        my $reals_duration = int( $duration * $percent );
+        my $remainder      = $duration - $reals_duration;
+        # TWEAK MIDI note details. The velocity, or volume, in particular
+        $track->new_event( 'note_on', 0, $channel, $note, $velo );
+        $track->new_event( 'note_off', $reals_duration, $channel, $note, NO_VELO );
+        # this is perhaps easier than passing a remainder around to use
+        # as the dtime for the next note_on event...
+        if ( $remainder > 0 ) {
+            $track->new_event( 'note_on',  0,          $channel, $note, NO_VELO );
+            $track->new_event( 'note_off', $remainder, $channel, $note, NO_VELO );
+        }
+    }
+}
+
+sub pitches_between {
+    my ( $p2i, $pitchl, @pair ) = @_;
+    my @index = sort { $a <=> $b } map { $p2i->{$_} } @pair[ 0, 1 ];
+    my @between;
+    if ( $index[1] - $index[0] > 1 ) {
+        @between = @{$pitchl}[ $index[0] + 1 .. $index[1] - 1 ];
+    }
+    return @between;
+}

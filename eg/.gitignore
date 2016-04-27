@@ -1,1 +1,4 @@
+*.log
+*.pdf
+*.json
 *.midi
