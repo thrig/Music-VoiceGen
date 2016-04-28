@@ -45,7 +45,7 @@ sub get_patch {
 sub melodize {
     my ($phrase) = @_;
     for my $voicen ( 0 .. $#$phrase ) {
-        my ( %notefreq, %pitch2index );
+        my ( %notefreq, %pitch2index, %stats );
         my $freqsum = 0;
         for my $n ( @{ $phrase->[$voicen] } ) {
             $notefreq{$n}++;
@@ -54,6 +54,9 @@ sub melodize {
         for my $v ( values %notefreq ) {
             $v /= $freqsum;
         }
+        # Unique pitches used by this voice, scale-wise; index position
+        # used by pitches_between to fill in notes between a given pair
+        # of notes, if any.
         my @pitches = sort { $a <=> $b } keys %notefreq;
         for my $i ( 0 .. $#pitches ) {
             $pitch2index{ $pitches[$i] } = $i;
@@ -65,24 +68,41 @@ sub melodize {
                 $phrase->[$voicen][ $noten + 1 ]
             );
             # ... and all that fuss just to sometimes play passing notes
-            if ( @between == 1
-                and rand() / 2 < $notefreq{ $between[0] } +
-                fudge_passing_odds( $noten / $#{ $phrase->[$voicen] }, $voicen ) ) {
-                $phrase->[$voicen][$noten] = [ $phrase->[$voicen][$noten], $between[0] ];
+            if ( @between == 1 ) {
+                $stats{"1"}->[1]++;
+                if (rand() < $notefreq{ $between[0] } +
+                    max( 0.1, fudge_passing_odds( $noten / $#{ $phrase->[$voicen] }, $voicen ) ) ) {
+                    $stats{"1"}->[0]++;
+                    $phrase->[$voicen][$noten] = [ $phrase->[$voicen][$noten], $between[0] ];
+                }
             }
-            if ( @between == 2
-                and rand() < $notefreq{ $between[0] } +
-                fudge_passing_odds( $noten / $#{ $phrase->[$voicen] }, $voicen ) ) {
-                $phrase->[$voicen][$noten] =
-                  [ $phrase->[$voicen][$noten], [ @between[ 0, 1 ] ] ];
+            if ( @between == 2 ) {
+                $stats{"2"}->[1]++;
+                if (rand() < $notefreq{ $between[0] } +
+                    max( 0.1, fudge_passing_odds( $noten / $#{ $phrase->[$voicen] }, $voicen ) ) ) {
+                    $stats{"2"}->[0]++;
+                    $phrase->[$voicen][$noten] =
+                      [ $phrase->[$voicen][$noten], [ @between[ 0, 1 ] ] ];
+                }
             }
-            if ( @between == 3
-                and rand() * 2 < $notefreq{ $between[0] } +
-                fudge_passing_odds( $noten / $#{ $phrase->[$voicen] }, $voicen ) ) {
-                $phrase->[$voicen][$noten] =
-                  [ [ $phrase->[$voicen][$noten], $between[0] ], [ @between[ 1, 2 ] ] ];
+            if ( @between == 3 ) {
+                $stats{"3"}->[1]++;
+                if (rand() < $notefreq{ $between[0] } +
+                    max( 0.1, fudge_passing_odds( $noten / $#{ $phrase->[$voicen] }, $voicen ) ) ) {
+                    $stats{"3"}->[0]++;
+                    $phrase->[$voicen][$noten] =
+                      [ [ $phrase->[$voicen][$noten], $between[0] ], [ @between[ 1, 2 ] ] ];
+                }
             }
         }
+        print "Voice $voicen passing notes - ";
+        for my $passtype ( sort { $a <=> $b } keys %stats ) {
+            my $passes = $stats{$passtype}->[0] // 0;
+            printf "$passtype=%d/%d(%.2f)\t", $passes, $stats{$passtype}->[1],
+              $passes / $stats{$passtype}->[1],
+              ;
+        }
+        print "\n";
     }
 }
 
@@ -100,22 +120,23 @@ sub midi_out {
             # (depending on what melodize does). stattaco or sustain can
             # be adjusted through the percent
             note_out(
-                $track, $channel,
-                $phrase->[$voicen][$noten],
+                $track, $channel, $phrase->[$voicen][$noten],
                 384 * 2,
-                ( 71 + int rand 17 ) / 100,
-                min(120,
-                    max(40,
-                        50 + 110 * fudge_passing_odds( $noten / $#{ $phrase->[$voicen] }, $voicen ) +
-                          int rand 15
-                    )
-                )
+                ( 79 + int rand 17 ) / 100,
+                midi_velo( $noten, $#{ $phrase->[$voicen] }, $voicen ),
             );
         }
         push @tracks, $track;
     }
     my $opus = MIDI::Opus->new( { ticks => 384, tracks => \@tracks } );
     $opus->write_to_file($midiname);
+}
+
+sub midi_velo {
+    my ( $noten, $phraselen, $voicen ) = @_;
+    min( 115,
+        max( 40, 50 + 110 * fudge_passing_odds( $noten / $phraselen, $voicen ) ) ) +
+      int rand 10;
 }
 
 sub note_out {
@@ -145,6 +166,9 @@ sub pitches_between {
     my @between;
     if ( $index[1] - $index[0] > 1 ) {
         @between = @{$pitchl}[ $index[0] + 1 .. $index[1] - 1 ];
+    }
+    if ( $pair[1] < $pair[0] ) {
+        @between = sort { $b <=> $a } @between;
     }
     return @between;
 }
