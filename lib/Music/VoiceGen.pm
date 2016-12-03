@@ -328,15 +328,17 @@ Intervals are only allowed where the resulting pitch exists in the
 B<pitches> attribute, so the number of possible pitches from a given
 pitch will be limited, especially if the pitch is near an extreme of the
 pitch range, or if the ambitus is limited, or if the intervals are a
-poor fit for the allowed pitches.
+poor fit for the allowed pitches. Restricting what intervals are
+possible has various benefits; the tritone is difficult to sing, and
+fewer allowed intervals leads to smaller possibility sets that thus cost
+less CPU and memory to compute over.
 
-Setting this attribute outside of B<new> will have no effect (use the
-B<update> method instead to change the odds).
+Setting this attribute outside of B<new> will have no effect on the
+B<possibles>; use the B<update> method instead to change the odds.
 
-The intervals are otherwise only for reference, and will be wiped out
-should an B<update> call be made without the preserve option.
-B<intervals> will not be set if custom B<possibles> are passed to
-B<new>.
+The intervals will be wiped out should an B<update> call be made without
+the preserve option. B<intervals> will not be set if custom B<possibles>
+are passed to B<new>.
 
 =item B<MAX_CONTEXT>
 
