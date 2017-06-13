@@ -17,7 +17,6 @@ use warnings;
 use JSON::MaybeXS;
 use List::UtilsBy qw(nsort_by);
 use Music::VoiceGen;
-use Try::Tiny;
 
 use Music::Tension::Cope;
 my $tension = Music::Tension::Cope->new;
@@ -70,7 +69,7 @@ my @voices = (
 my ( $best_phrase, $best_score );
 $best_score = ~0;
 
-try {
+eval {
     # Must also handle PIPE, as if piping to some other command, a
     # control+c will signal all the processes in the foreground process
     # group, which will cause a PIPE to this process as the process
